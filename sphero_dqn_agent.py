@@ -269,7 +269,7 @@ class SpheroDqnAgent:
                 self.epsilon_min = params_json.get('epsilon_min', self.EPSILON_MIN)
                 self.epsilon_decay_rate = params_json.get('epsilon_decay_rate', self.EPSILON_DECAY_RATE)
                 self.learning_rate = params_json.get('learning_rate', self.LEARNING_RATE)
-                self.num_steps_per_episode = params_json.get('num_steps_pre_episode', self.NUM_STEPS_PER_EPISODE)
+                self.num_steps_per_episode = params_json.get('num_steps_per_episode', self.NUM_STEPS_PER_EPISODE)
                 self.batch_size = params_json.get('batch_size', self.BATCH_SIZE)
                 self.target_transfer_period = params_json.get('target_transfer_period', self.TARGET_TRANSFER_PERIOD)
         else:
