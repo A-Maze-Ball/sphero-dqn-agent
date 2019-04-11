@@ -1,9 +1,8 @@
 numpy
 tensorflow
 keras
-argparse
-gym
-gym-sphero
 pybind11; sys_platform == 'win32'
 spheropy[winble]; sys_platform == 'win32'
 spheropy[pygatt]; sys_platform != 'win32'
+gym
+gym-sphero

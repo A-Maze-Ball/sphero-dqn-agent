@@ -17,6 +17,53 @@ import keras
 import gym
 import gym_sphero
 
+#
+# Notes to the reader
+#
+
+# Throughout the code we follow these particular naming conventions:
+#   "state" is used to mean the state returned from the sphero.
+#   "obs" is short for observation and indicates what the agent uses to make
+#       predictions.
+#       In this case we combine the state at t-1 and the action taken at t-1 as
+#       the observation at time t.
+#       The observation at time t is a proxy for the state at time t
+#   Variables with postfix "_t" indicates it is that variable at time t.
+#       e.g.  "state_t" is the state at time t
+#   Variables with postfix "_tm1" indicates it is that variable at time t-1.
+#       e.g.  "state_tm1" is the state at time t-1
+#   "neural network" and "model" are used interchangeably.
+
+#
+# Neural Network
+#
+
+# NOTE: You should modify the code in this function
+# to change the structure or parameters of the neural network/model.
+# This is only called when constructing a new model and not loading an
+# old model.
+def build_neural_network(input_size, output_size, learning_rate):
+    model = keras.models.Sequential()
+
+    # Define input layer
+    model.add(keras.layers.Dense(12, input_dim=input_size, activation='relu'))
+
+    # Define first hidden layer
+    model.add(keras.layers.Dense(12, activation='relu'))
+
+    # Define our output layer
+    # This layer outputs the estimated/predicted optimal Q*(s,a) function
+    # values for
+    # every action.
+    model.add(keras.layers.Dense(output_size, activation='linear', name='output'))
+
+    model.compile(loss='mse', optimizer=keras.optimizers.Adam(lr=learning_rate))
+
+    return model
+
+#
+# Agent
+#
 
 class SpheroDqnAgent:
 
@@ -51,38 +98,25 @@ class SpheroDqnAgent:
         self._init_hyperparams()
         self._init_env()
         self._init_model()
-        # TODO: We might need to make the max memory replay buffer length configurable
+        # TODO: We might need to make the max memory replay buffer length
+        # configurable
         # The memory replay buffer (past experience)
         self.memory = deque(maxlen=2000)
 
-    def _build_model(self):
-        # NOTE: You should modify the code in this function
-        # to change the structure or parameters of the neural network/model.
-        # This is only called when constructing a new model and not loading an
-        # old model.
-        model = keras.models.Sequential()
 
-        # We add an encoded action to the observation_space (state) size
-        # since we are going to use the previous action + the previous state as our observation.
-        obs_size = self.state_size + 1
+    def _build_model(self):
+        state_size = np.sum([np.prod(space.shape) for space in self.env.observation_space.spaces])
+        action_size = np.prod(self.env.action_space.shape)
+
+        # We add action size to the state size
+        # since we are going to use the action at t-1 combined with
+        # the state at t-1 as our observation.
+        obs_size = state_size + action_size
 
         # Compute the total number of possible actions (255*359 for Sphero)
         num_actions = np.prod(self.env.action_space.high - self.env.action_space.low)
 
-        # Define input layer
-        model.add(keras.layers.Dense(12, input_dim=obs_size, activation='relu'))
-
-        # Define first hidden layer
-        model.add(keras.layers.Dense(12, activation='relu'))
-
-        # Define our output layer
-        # This layer outputs the estimated/predicted optimal Q*(s,a) function values for
-        # every action.
-        model.add(keras.layers.Dense(num_actions, activation='linear', name='output'))
-
-        model.compile(loss='mse', optimizer=keras.optimizers.Adam(lr=self.learning_rate))
-
-        return model
+        return build_neural_network(obs_size, num_actions, self.learning_rate)
 
 
     def train(self, num_episodes=None, save_period=10):
@@ -95,44 +129,45 @@ class SpheroDqnAgent:
             # We have to save some values from the previous steps.
 
             # If we are at time step t (step),
-            # then prev_state is the state at time t-1
-            # and prev_action is the action taken at time t-1
-            # when sphero was in prev_state.
-            prev_state = self.env.reset()
-            prev_action = np.zeros(self.env.action_space.shape, dtype=int)
-            prev_obs = self._get_observation(prev_state, prev_action)
-            prev_done = False
+            # then state_tm1 is the state at time t-1
+            # and action_tm1 is the action taken at time t-1
+            # when sphero was in state_tm1.
+            state_tm1 = self.env.reset()
+            action_tm1 = np.zeros(self.env.action_space.shape, dtype=int)
+            obs_tm1 = self._get_observation(state_tm1, action_tm1)
+            done_tm1 = False
 
-            for step in range(self.num_steps_per_episode):
-                obs = self._get_observation(prev_state, prev_action)
-                action = self._get_action(obs)
-                # current_state is state at time t (not t+1)
-                current_state, prev_reward, done, _ = self.env.step(action)
-                self._remember(prev_obs, prev_action, prev_reward, obs, prev_done)
+            for step_t in range(self.num_steps_per_episode):
+                obs_t = self._get_observation(state_tm1, action_tm1)
+                action_t = self._get_action(obs_t)
+                state_t, reward_tm1, done_t, _ = self.env.step(action_t)
+                self._remember(obs_tm1, action_tm1, reward_tm1, obs_t, done_tm1)
 
-                # updates for time t becoming time t-1
-                prev_state = current_state
-                prev_action = action
-                prev_obs = obs
-                prev_done = done
-                if done:
+                # Updates for time t becoming time t-1
+                state_tm1 = state_t
+                action_tm1 = action_t
+                obs_tm1 = obs_t
+                done_tm1 = done_t
+                if done_t:
                     break
 
                 # TODO: Do we want a different hyperparam than batch size here?
-                # TODO: We might need to train our model/network in-between episodes
+                # TODO: We might need to train our model/network in-between
+                # episodes
                 # if it takes a significant amount of time.
-                # Alternatively, we could stop the sphero before training and take the low-velocity penalty?
+                # Alternatively, we could stop the sphero before training and
+                # take the low-velocity penalty?
                 if len(self.memory) > self.batch_size:
                     self._replay()
 
-                if (step + 1) % self.target_transfer_period == 0:
+                if (step_t + 1) % self.target_transfer_period == 0:
                     self._transfer_weights_to_target_model()
 
             # Tell the sphero to stop and get the previous reward
             # so we can save it in our memory replay buffer.
-            current_state, prev_reward, _, _ = self.env.step([0, 0])
-            obs = self._get_observation(current_state, [0, 0])
-            self._remember(prev_obs, prev_action, prev_reward, obs, prev_done)
+            state_t, reward_tm1, _, _ = self.env.step([0, 0])
+            obs_t = self._get_observation(state_t, [0, 0])
+            self._remember(obs_tm1, action_tm1, reward_tm1, obs_t, done_tm1)
 
             self._decay_epsilon()
 
@@ -142,21 +177,21 @@ class SpheroDqnAgent:
 
 
     def run(self, num_episodes=1):
-        prev_state = None
-        prev_action = None
         for episode in range(num_episodes):
-            reset_state = self.env.reset()
-            prev_state = prev_state if prev_state is not None else reset_state
-            prev_action = prev_action if prev_action is not None else np.zeros(self.env.action_space.shape)
+            state_tm1 = self.env.reset()
+            action_tm1 = np.zeros(self.env.action_space.shape)
 
             for step in range(self.num_steps_per_episode):
-                obs = self._get_observation(prev_state, prev_action)
-                action = self._get_action(obs, False) # don't use epsilon randomness.
-                current_state, reward, done, _ = self.env.step(action)
-                prev_state = current_state
-                prev_action = action
-                if done:
+                obs_t = self._get_observation(state_tm1, action_tm1)
+                action_t = self._get_action(obs_t, False) # don't use epsilon randomness.
+                state_t, reward_tm1, done_t, _ = self.env.step(action)
+                state_tm1 = state_t
+                action_tm1 = action_t
+                if done_t:
                     break
+
+            # Tell the sphero to stop.
+            self.env.step([0, 0])
 
 
     def _decay_epsilon(self):
@@ -165,7 +200,6 @@ class SpheroDqnAgent:
 
 
     def _get_action(self, obs, use_epsilon=True):
-        # Get the action
         if use_epsilon and np.random.rand() <= self.epsilon:
             return self.env.action_space.sample()
         else:
@@ -174,16 +208,16 @@ class SpheroDqnAgent:
             return _decode_action(encoded_action)
 
 
-    def _get_observation(self, prev_state, prev_action):
-        return np.concatenate((_reshape_state(prev_state), [_encode_action(prev_action)]))
+    def _get_observation(self, state_tm1, action_tm1):
+        return np.concatenate((_reshape_state(state_tm1), action_tm1))
 
 
-    def _remember(self, prev_obs, prev_action, prev_reward, obs, prev_done):
-        self.memory.append((prev_obs,
-            prev_action,
-            prev_reward,
-            obs,
-            prev_done))
+    def _remember(self, obs_tm1, action_tm1, reward_tm1, obs_t, done_tm1):
+        self.memory.append((obs_tm1,
+            action_tm1,
+            reward_tm1,
+            obs_t,
+            done_tm1))
 
 
     def _replay(self):
@@ -191,32 +225,34 @@ class SpheroDqnAgent:
         # TODO: I don't think this for loop is doing true minibatch training.
         # we should be able to compute the target values in array form and only
         # do the model fitting once.
-        for prev_obs, prev_action, prev_reward, obs, prev_done in minibatch:
+        for obs_tm1, action_tm1, reward_tm1, obs_t, done_tm1 in minibatch:
             # reshape to look like a batch of size 1.
-            prev_obs = prev_obs.reshape((1,-1))
+            obs_tm1 = obs_tm1.reshape((1,-1))
 
-            encoded_prev_action = _encode_action(prev_action)
+            encoded_action_tm1 = _encode_action(action_tm1)
 
             # We are calling this variable "target" now,
             # but at this point it is just a set of predicted Q-values
-            # it will become the target once 
-            target = self.target_model.predict(prev_obs)
-            if prev_done:
-                # We don't need to predict the future Q-values
+            # it will become the target in the if/else block below.
+            target = self.target_model.predict(obs_tm1)
+
+            if done_tm1:
+                # We don't need to predict the future Q-values since
                 # we are at the end of the episode so there is no future.
-                target[0][encoded_prev_action] = prev_reward
+                target[0][encoded_action_tm1] = reward_tm1
             else:
                 # reshape to look like a batch of size 1
-                obs = obs.reshape((1,-1))
-                Q_future = self.target_model.predict(obs)[0]
-                target[0][encoded_prev_action] = prev_reward + (max(Q_future) * self.discount_rate)
+                obs_t = obs_t.reshape((1,-1))
+                Q_future = self.target_model.predict(obs_t)[0]
+                target[0][encoded_action_tm1] = reward_tm1 + (max(Q_future) * self.discount_rate)
 
             # Do the gradient descent
-            self.model.fit(prev_obs, target, epochs=1, verbose=0)
+            self.model.fit(obs_tm1, target, epochs=1, verbose=0)
 
 
     def _transfer_weights_to_target_model(self):
         self.target_model.set_weights(self.model.get_weights())
+
 
     #
     # __init__ and file helpers
@@ -261,6 +297,7 @@ class SpheroDqnAgent:
 
         with open(params_file_path, 'w') as params_file:
             json.dump(params_json, params_file, indent=2)
+
 
     def _init_env(self):
         use_ble = self.USE_BLE
@@ -338,8 +375,6 @@ class SpheroDqnAgent:
             low_velocity_penalty=low_velocity_penalty,
             velocity_reward_multiplier=velocity_reward_multiplier)
 
-        self.state_size = np.sum([np.prod(space.shape) for space in self.env.observation_space.spaces])
-
 
     def _init_model(self):
         is_loaded = self._load_model()
@@ -386,7 +421,6 @@ class SpheroDqnAgent:
 #
 # helper functions
 #
-
 def _decode_action(encoded_action):
         return np.array([255 & encoded_action, ~359 & (encoded_action << 8)], dtype=int)
 
@@ -401,7 +435,6 @@ def _reshape_state(state):
 #
 # cmd line program functions
 #
-
 def main():
     script_args = parse_args()
 
