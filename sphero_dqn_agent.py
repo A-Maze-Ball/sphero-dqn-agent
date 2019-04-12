@@ -64,7 +64,6 @@ def build_neural_network(input_size, output_size, learning_rate):
 #
 # Agent
 #
-
 class SpheroDqnAgent:
 
     # Default hyperprams
@@ -100,6 +99,8 @@ class SpheroDqnAgent:
         self._init_model()
         # TODO: We might need to make the max memory replay buffer length
         # configurable
+        # TODO: We might want to save the memory buffer
+        # TODO: We might want to pre-fill the memory buffer.
         # The memory replay buffer (past experience)
         self.memory = deque(maxlen=2000)
 
@@ -119,10 +120,7 @@ class SpheroDqnAgent:
         return build_neural_network(obs_size, num_actions, self.learning_rate)
 
 
-    def train(self, num_episodes=None, save_period=10):
-        if num_episodes is None:
-            num_episodes = save_period
-
+    def train(self, num_episodes, save_period=10):
         for episode in range(num_episodes):
             # We have to do some unique things to handle the time shift
             # in the sphero gym env compared to other gym envs.
@@ -132,15 +130,39 @@ class SpheroDqnAgent:
             # then state_tm1 is the state at time t-1
             # and action_tm1 is the action taken at time t-1
             # when sphero was in state_tm1.
-            state_tm1 = self.env.reset()
+
+            state_tm1 = None
+            for retry_count in range(3):
+                try:
+                    state_tm1 = self.env.reset()
+                    break
+                except:
+                    continue
+
+            if state_tm1 is None:
+                raise RuntimeError("Could not reset environment at beginning of episode.")
+
             action_tm1 = np.zeros(self.env.action_space.shape, dtype=int)
             obs_tm1 = self._get_observation(state_tm1, action_tm1)
             done_tm1 = False
 
-            for step_t in range(self.num_steps_per_episode):
+            num_consecutive_step_failures = 0
+            step_t = 0
+            while step_t < self.num_steps_per_episode:
                 obs_t = self._get_observation(state_tm1, action_tm1)
                 action_t = self._get_action(obs_t)
-                state_t, reward_tm1, done_t, _ = self.env.step(action_t)
+                try:
+                    state_t, reward_tm1, done_t, _ = self.env.step(action_t)
+                    num_consecutive_step_failures = 0
+                except:
+                    num_consecutive_step_failures += 1
+                    if num_consecutive_step_failures <= 3:
+                        # Turn back time and skip this step.
+                        step_t -= 1
+                        continue
+                    else:
+                        raise RuntimeError("Too many consecutive errors while trying to step occured in episode")
+
                 self._remember(obs_tm1, action_tm1, reward_tm1, obs_t, done_tm1)
 
                 # Updates for time t becoming time t-1
@@ -163,11 +185,19 @@ class SpheroDqnAgent:
                 if (step_t + 1) % self.target_transfer_period == 0:
                     self._transfer_weights_to_target_model()
 
+                # Update our loop variable
+                step_t += 1
+
             # Tell the sphero to stop and get the previous reward
             # so we can save it in our memory replay buffer.
-            state_t, reward_tm1, _, _ = self.env.step([0, 0])
-            obs_t = self._get_observation(state_t, [0, 0])
-            self._remember(obs_tm1, action_tm1, reward_tm1, obs_t, done_tm1)
+            for retry_count in range(3):
+                try:
+                    state_t, reward_tm1, _, _ = self.env.step([0, 0])
+                    obs_t = self._get_observation(state_t, [0, 0])
+                    self._remember(obs_tm1, action_tm1, reward_tm1, obs_t, done_tm1)
+                    break
+                except:
+                    raise RuntimeError("Could not stop Sphero at end of episode.")
 
             self._decay_epsilon()
 
@@ -178,20 +208,51 @@ class SpheroDqnAgent:
 
     def run(self, num_episodes=1):
         for episode in range(num_episodes):
-            state_tm1 = self.env.reset()
+            state_tm1 = None
+            for retry_count in range(3):
+                try:
+                    state_tm1 = self.env.reset()
+                    break
+                except:
+                    continue
+
+            if state_tm1 is None:
+                raise RuntimeError("Could not reset environment at beginning of episode.")
+
             action_tm1 = np.zeros(self.env.action_space.shape)
 
-            for step in range(self.num_steps_per_episode):
+            num_consecutive_step_failures = 0
+            step_t = 0
+            while step_t < self.num_steps_per_episode:
                 obs_t = self._get_observation(state_tm1, action_tm1)
                 action_t = self._get_action(obs_t, False) # don't use epsilon randomness.
-                state_t, reward_tm1, done_t, _ = self.env.step(action)
+                try:
+                    state_t, reward_tm1, done_t, _ = self.env.step(action_t)
+                    num_consecutive_step_failures = 0
+                except:
+                    num_consecutive_step_failures += 1
+                    if num_consecutive_step_failures <= 3:
+                        # Turn back time and skip this step.
+                        step_t -= 1
+                        continue
+                    else:
+                        raise RuntimeError("Too many consecutive errors while trying to step occured in episode")
+
                 state_tm1 = state_t
                 action_tm1 = action_t
                 if done_t:
                     break
 
+                # Update loop variable
+                step_t += 1
+
             # Tell the sphero to stop.
-            self.env.step([0, 0])
+            for retry_count in range(3):
+                try:
+                    self.env.step([0, 0])
+                    break
+                except:
+                    raise RuntimeError("Could not stop Sphero at end of episode.")
 
 
     def _decay_epsilon(self):
@@ -203,7 +264,8 @@ class SpheroDqnAgent:
         if use_epsilon and np.random.rand() <= self.epsilon:
             return self.env.action_space.sample()
         else:
-            act_values = self.model.predict(obs)
+            # reshape obs to look like a batch of size 1.
+            act_values = self.model.predict(obs.reshape((1,-1)))
             encoded_action = np.argmax(act_values[0])
             return _decode_action(encoded_action)
 
@@ -382,7 +444,8 @@ class SpheroDqnAgent:
             self.num_episodes_at_start = 0
             self.model = self._build_model()
             self.target_model = self._build_model()
-            # Save the model to disk since we are building it for the first time.
+            # Save the model to disk since we are building it for the first
+            # time.
             self._save_model(0)
 
 
@@ -421,8 +484,9 @@ class SpheroDqnAgent:
 #
 # helper functions
 #
+
 def _decode_action(encoded_action):
-        return np.array([255 & encoded_action, ~359 & (encoded_action << 8)], dtype=int)
+        return np.array([255 & encoded_action, 0x1FF & (encoded_action << 8)], dtype=int)
 
 
 def _encode_action(action):
@@ -435,6 +499,7 @@ def _reshape_state(state):
 #
 # cmd line program functions
 #
+
 def main():
     script_args = parse_args()
 
