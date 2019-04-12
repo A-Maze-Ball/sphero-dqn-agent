@@ -83,6 +83,7 @@ They are configured in `hyperparams.json`.
 * `learning_rate`
 * `num_steps_per_episode`
 * `target_transfer_period`
+* `memory_buffer_size`
 
 
 ### Environment
@@ -102,6 +103,7 @@ These are the set of parameters that are used to configure the behavior of the S
 and are configured in `sphero_config.json`.
 * `min_collision_threshold`
 * `collision_dead_time`
+* `level_sphero`
 
 
 ### Bluetooth

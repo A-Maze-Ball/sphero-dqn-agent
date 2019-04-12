@@ -1,8 +1,8 @@
-numpy
-tensorflow
-keras
-pybind11; sys_platform == 'win32'
-spheropy[winble]; sys_platform == 'win32'
-spheropy[pygatt]; sys_platform != 'win32'
 gym
-gym-sphero
+gym-sphero >= 0.0.5
+keras
+numpy
+pybind11 >= 2.2.3; sys_platform == 'win32'
+spheropy[pygatt] >= 0.0.4; sys_platform != 'win32'
+spheropy[winble] >= 0.0.4; sys_platform == 'win32'
+tensorflow
