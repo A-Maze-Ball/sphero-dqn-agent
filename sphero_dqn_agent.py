@@ -102,13 +102,13 @@ class SpheroDqnAgent:
 
 # endregion
 
+# region Public members
+
     def __init__(self, path):
         self.path = os.path.realpath(os.path.abspath(path))
         self._init_hyperparams()
         self._init_env()
         self._init_model()
-        # TODO: We might need to make the max memory replay buffer length
-        # configurable
         # TODO: We might want to save the memory buffer
         # TODO: We might want to pre-fill the memory buffer.
         # The memory replay buffer (past experience)
@@ -125,20 +125,23 @@ class SpheroDqnAgent:
             # and action_tm1 is the action taken at time t-1
             # when sphero was in state_tm1.
 
-            state_tm1 = None
+            state_t = None
             for _ in range(3):
                 try:
-                    state_tm1 = self.env.reset()
+                    state_t = self.env.reset()
                     break
                 except:
                     continue
 
-            if state_tm1 is None:
+            if state_t is None:
                 raise RuntimeError(
                     "Could not reset environment at beginning of episode.")
 
+            # Assign placeholders for the t-1 variables
+            state_tm1 = state_t
             action_tm1 = np.zeros(self.env.action_space.shape, dtype=int)
             obs_tm1 = self._get_observation(state_tm1, action_tm1)
+            reward_tm1 = 0
             done_tm1 = False
 
             num_consecutive_step_failures = 0
@@ -147,7 +150,7 @@ class SpheroDqnAgent:
                 obs_t = self._get_observation(state_tm1, action_tm1)
                 action_t = self._get_action(obs_t)
                 try:
-                    state_t, reward_tm1, done_t, _ = self.env.step(action_t)
+                    state_t, reward_t, done_t, _ = self.env.step(action_t)
                     num_consecutive_step_failures = 0
                 except:
                     num_consecutive_step_failures += 1
@@ -165,6 +168,7 @@ class SpheroDqnAgent:
                 # Updates for time t becoming time t-1
                 state_tm1 = state_t
                 action_tm1 = action_t
+                reward_tm1 = reward_t
                 obs_tm1 = obs_t
                 done_tm1 = done_t
                 if done_t:
@@ -172,8 +176,7 @@ class SpheroDqnAgent:
 
                 # TODO: Do we want a different hyperparam than batch size here?
                 # TODO: We might need to train our model/network in-between
-                # episodes
-                # if it takes a significant amount of time.
+                # episodes if it takes a significant amount of time.
                 # Alternatively, we could stop the sphero before training and
                 # take the low-velocity penalty?
                 if len(self.memory) > self.batch_size:
@@ -185,7 +188,7 @@ class SpheroDqnAgent:
                 # Update our loop variable
                 step_t += 1
 
-            # Tell the sphero to stop and get the previous reward
+            # Tell the Sphero to stop and get the previous reward
             # so we can save it in our memory replay buffer.
             for _ in range(3):
                 try:
@@ -206,18 +209,19 @@ class SpheroDqnAgent:
 
     def run(self, num_episodes=1):
         for episode in range(num_episodes):
-            state_tm1 = None
+            state_t = None
             for _ in range(3):
                 try:
-                    state_tm1 = self.env.reset()
+                    state_t = self.env.reset()
                     break
                 except:
                     continue
 
-            if state_tm1 is None:
+            if state_t is None:
                 raise RuntimeError(
                     "Could not reset environment at beginning of episode.")
 
+            state_tm1 = state_t
             action_tm1 = np.zeros(self.env.action_space.shape)
 
             num_consecutive_step_failures = 0
@@ -227,7 +231,7 @@ class SpheroDqnAgent:
                 # don't use epsilon randomness.
                 action_t = self._get_action(obs_t, False)
                 try:
-                    state_t, reward_tm1, done_t, _ = self.env.step(action_t)
+                    state_t, reward_t, done_t, _ = self.env.step(action_t)
                     num_consecutive_step_failures = 0
                 except:
                     num_consecutive_step_failures += 1
@@ -241,6 +245,7 @@ class SpheroDqnAgent:
 
                 state_tm1 = state_t
                 action_tm1 = action_t
+                reward_tm1 = reward_t
                 if done_t:
                     break
 
@@ -255,6 +260,10 @@ class SpheroDqnAgent:
                 except:
                     raise RuntimeError(
                         "Could not stop Sphero at end of episode.")
+
+# endregion
+
+# region Private members
 
     def _build_model(self):
         state_size = np.sum([np.prod(space.shape)
@@ -327,7 +336,6 @@ class SpheroDqnAgent:
 
     def _transfer_weights_to_target_model(self):
         self.target_model.set_weights(self.model.get_weights())
-
 
 # region __init__ and file helpers
 
@@ -515,10 +523,10 @@ class SpheroDqnAgent:
         self.model.save(model_file)
 
 # endregion
+# endregion
 
 
 # region helper functions
-
 
 def _index_to_action(action_index):
     return np.array([255 & action_index, 0x1FF & (action_index << 8)], dtype=int)

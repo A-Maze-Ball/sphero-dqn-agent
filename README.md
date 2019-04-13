@@ -123,3 +123,14 @@ The script will load a saved model from the `model_<episode count>.h5` file with
 `<episode count>` is the number of episodes the model has been trained on thus far.
 This makes it easy to share your custom model configurations with someone else
 and have them keep training where you left off.
+
+## Resources
+The following were referenced in the creation of this project.
+
+[Playing Atari with Deep Reinforcement Learning](https://arxiv.org/pdf/1312.5602v1.pdf)
+
+[keon.io: Deep Q-Learning with Keras and Gym](https://keon.io/deep-q-learning/)
+
+[Ben Lau: Using Keras and Deep Q-Network to Play FlappyBird](https://yanpanlau.github.io/2016/07/10/FlappyBird-Keras.html)
+
+[Yash Patel: Reinforcement Learning w/ Keras + OpenAI: DQNs](https://towardsdatascience.com/reinforcement-learning-w-keras-openai-dqns-1eed3a5338c)
