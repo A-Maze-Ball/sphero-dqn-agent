@@ -154,6 +154,7 @@ class SpheroDqnAgent:
                     num_consecutive_step_failures = 0
                 except:
                     num_consecutive_step_failures += 1
+                    # TODO: get rid of magic number 3
                     if num_consecutive_step_failures <= 3:
                         # Turn back time and skip this step.
                         step_t -= 1
@@ -165,12 +166,6 @@ class SpheroDqnAgent:
                 self._remember(obs_tm1, action_tm1,
                                reward_tm1, obs_t, done_tm1)
 
-                # Updates for time t becoming time t-1
-                state_tm1 = state_t
-                action_tm1 = action_t
-                reward_tm1 = reward_t
-                obs_tm1 = obs_t
-                done_tm1 = done_t
                 if done_t:
                     break
 
@@ -185,14 +180,20 @@ class SpheroDqnAgent:
                 if (step_t + 1) % self.target_transfer_period == 0:
                     self._transfer_weights_to_target_model()
 
-                # Update our loop variable
+                # Update time (our loop variable)
                 step_t += 1
+                # Updates for time t becoming time t-1
+                state_tm1 = state_t
+                action_tm1 = action_t
+                reward_tm1 = reward_t
+                obs_tm1 = obs_t
+                done_tm1 = done_t
 
             # Tell the Sphero to stop and get the previous reward
             # so we can save it in our memory replay buffer.
             for _ in range(3):
                 try:
-                    state_t, reward_tm1, _, _ = self.env.step([0, 0])
+                    state_t, reward_t, _, _ = self.env.step([0, 0])
                     obs_t = self._get_observation(state_t, [0, 0])
                     self._remember(obs_tm1, action_tm1,
                                    reward_tm1, obs_t, done_tm1)
@@ -290,6 +291,7 @@ class SpheroDqnAgent:
             return self.env.action_space.sample()
         else:
             # reshape obs to look like a batch of size 1.
+            # act_values is our Q(obs, a)
             act_values = self.model.predict(obs.reshape((1, -1)))
             action_index = np.argmax(act_values[0])
             return _index_to_action(action_index)
@@ -326,10 +328,11 @@ class SpheroDqnAgent:
                 target[0][action_tm1_index] = reward_tm1
             else:
                 # reshape to look like a batch of size 1
+                # TODO: illustrate equation in comments here.
                 obs_t = obs_t.reshape((1, -1))
                 Q_future = self.target_model.predict(obs_t)[0]
-                target[0][action_tm1_index] = reward_tm1 + \
-                    (max(Q_future) * self.discount_rate)
+                target[0][action_tm1_index] = (
+                    reward_tm1 + (max(Q_future) * self.discount_rate))
 
             # Do the gradient descent
             self.model.fit(obs_tm1, target, epochs=1, verbose=0)
@@ -485,6 +488,7 @@ class SpheroDqnAgent:
         is_loaded = self._load_model()
         if not is_loaded:
             self.num_episodes_at_start = 0
+            # TODO: should we sync the weights at this point?
             self.model = self._build_model()
             self.target_model = self._build_model()
             # Save the model to disk since we are building it for the first
@@ -533,7 +537,7 @@ def _index_to_action(action_index):
 
 
 def _action_to_index(action):
-    return action[0] + (action[1] >> 8)
+    return (255 & action[0]) | ((0x1FF & action[1]) >> 8)
 
 
 def _reshape_state(state):
