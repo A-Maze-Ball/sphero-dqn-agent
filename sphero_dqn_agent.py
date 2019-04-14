@@ -7,6 +7,7 @@ import json
 import glob
 import re
 import random
+import csv
 from collections import deque
 
 # ML related packages
@@ -102,6 +103,12 @@ class SpheroDqnAgent:
 
 # endregion
 
+# region Constants
+
+    MAX_RETRY_ATTEMPTS = 3
+
+# endregion
+
 # region Public members
 
     def __init__(self, path):
@@ -115,7 +122,20 @@ class SpheroDqnAgent:
         self.memory = deque(maxlen=self.memory_buffer_size)
 
     def train(self, num_episodes, save_period=10):
+        try:
+            self._train(num_episodes, save_period)
+        except:
+            # Always save the model if an error occured.
+            self._save_model()
+            raise
+
+    def _train(self, num_episodes, save_period):
         for episode in range(num_episodes):
+            # Variables used to record results
+            reward_sum = 0
+            num_collisions_sum = 0
+            velocity_magnitude_sum = 0
+
             # We have to do some unique things to handle the time shift
             # in the sphero gym env compared to other gym envs.
             # We have to save some values from the previous steps.
@@ -126,7 +146,7 @@ class SpheroDqnAgent:
             # when sphero was in state_tm1.
 
             state_t = None
-            for _ in range(3):
+            for _ in range(self.MAX_RETRY_ATTEMPTS):
                 try:
                     state_t = self.env.reset()
                     break
@@ -153,9 +173,8 @@ class SpheroDqnAgent:
                     state_t, reward_t, done_t, _ = self.env.step(action_t)
                     num_consecutive_step_failures = 0
                 except:
-                    num_consecutive_step_failures += 1
-                    # TODO: get rid of magic number 3
-                    if num_consecutive_step_failures <= 3:
+                    if num_consecutive_step_failures < self.MAX_RETRY_ATTEMPTS:
+                        num_consecutive_step_failures += 1
                         # Turn back time and skip this step.
                         step_t -= 1
                         continue
@@ -166,8 +185,9 @@ class SpheroDqnAgent:
                 self._remember(obs_tm1, action_tm1,
                                reward_tm1, obs_t, done_tm1)
 
-                if done_t:
-                    break
+                reward_sum += reward_t
+                num_collisions_sum += state_t[-1]
+                velocity_magnitude_sum += np.linalg.norm(state_t[1])
 
                 # TODO: Do we want a different hyperparam than batch size here?
                 # TODO: We might need to train our model/network in-between
@@ -177,8 +197,12 @@ class SpheroDqnAgent:
                 if len(self.memory) > self.batch_size:
                     self._replay()
 
+                # Convert to 1 based index before checking the transfer period.
                 if (step_t + 1) % self.target_transfer_period == 0:
                     self._transfer_weights_to_target_model()
+
+                if done_t:
+                    break
 
                 # Update time (our loop variable)
                 step_t += 1
@@ -191,27 +215,45 @@ class SpheroDqnAgent:
 
             # Tell the Sphero to stop and get the previous reward
             # so we can save it in our memory replay buffer.
-            for _ in range(3):
+            # Then do one more replay of experience.
+            for _ in range(self.MAX_RETRY_ATTEMPTS):
                 try:
                     state_t, reward_t, _, _ = self.env.step([0, 0])
-                    obs_t = self._get_observation(state_t, [0, 0])
+                    obs_t = self._get_observation(state_tm1, action_tm1)
                     self._remember(obs_tm1, action_tm1,
                                    reward_tm1, obs_t, done_tm1)
+
+                    if len(self.memory) > self.batch_size:
+                        self._replay()
+
+                    reward_sum += reward_t
+                    num_collisions_sum += state_t[-1]
+                    velocity_magnitude_sum += np.linalg.norm(state_t[1])
                     break
                 except:
                     raise RuntimeError(
                         "Could not stop Sphero at end of episode.")
 
+            self.num_episodes_used_to_train_model += 1
+
             self._decay_epsilon()
 
             # Convert to 1 based index for saving
             if (episode + 1) % save_period == 0:
-                self._save_model(episode + 1)
+                self._save_model()
+
+            self._save_train_result(
+                reward_sum, num_collisions_sum, velocity_magnitude_sum)
 
     def run(self, num_episodes=1):
         for episode in range(num_episodes):
+            # Variables used to record results
+            reward_sum = 0
+            num_collisions_sum = 0
+            velocity_magnitude_sum = 0
+
             state_t = None
-            for _ in range(3):
+            for _ in range(self.MAX_RETRY_ATTEMPTS):
                 try:
                     state_t = self.env.reset()
                     break
@@ -235,8 +277,8 @@ class SpheroDqnAgent:
                     state_t, reward_t, done_t, _ = self.env.step(action_t)
                     num_consecutive_step_failures = 0
                 except:
-                    num_consecutive_step_failures += 1
-                    if num_consecutive_step_failures <= 3:
+                    if num_consecutive_step_failures < self.MAX_RETRY_ATTEMPTS:
+                        num_consecutive_step_failures += 1
                         # Turn back time and skip this step.
                         step_t -= 1
                         continue
@@ -244,9 +286,12 @@ class SpheroDqnAgent:
                         raise RuntimeError(
                             "Too many consecutive errors while trying to step occured in episode")
 
+                reward_sum += reward_t
+                num_collisions_sum += state_t[-1]
+                velocity_magnitude_sum += np.linalg.norm(state_t[1])
+
                 state_tm1 = state_t
                 action_tm1 = action_t
-                reward_tm1 = reward_t
                 if done_t:
                     break
 
@@ -254,13 +299,20 @@ class SpheroDqnAgent:
                 step_t += 1
 
             # Tell the sphero to stop.
-            for _ in range(3):
+            for _ in range(self.MAX_RETRY_ATTEMPTS):
                 try:
-                    self.env.step([0, 0])
+                    state_t, reward_t, _, _ = self.env.step([0, 0])
+                    reward_sum += reward_t
+                    num_collisions_sum += state_t[-1]
+                    velocity_magnitude_sum += np.linalg.norm(state_t[1])
                     break
                 except:
                     raise RuntimeError(
                         "Could not stop Sphero at end of episode.")
+
+            # Convert to 1 based index for saving
+            self._save_run_result(episode + 1, reward_sum,
+                                  num_collisions_sum, velocity_magnitude_sum)
 
 # endregion
 
@@ -487,13 +539,13 @@ class SpheroDqnAgent:
     def _init_model(self):
         is_loaded = self._load_model()
         if not is_loaded:
-            self.num_episodes_at_start = 0
-            # TODO: should we sync the weights at this point?
+            self.num_episodes_used_to_train_model = 0
             self.model = self._build_model()
             self.target_model = self._build_model()
+            self._transfer_weights_to_target_model()
             # Save the model to disk since we are building it for the first
             # time.
-            self._save_model(0)
+            self._save_model()
 
     def _load_model(self):
         episode_count = self._get_episode_count()
@@ -501,9 +553,9 @@ class SpheroDqnAgent:
             model_file = os.path.join(self.path, f'model_{episode_count}.h5')
             self.model = keras.models.load_model(model_file)
             self.target_model = keras.models.load_model(model_file)
-            self.num_episodes_at_start = episode_count
+            self.num_episodes_used_to_train_model = episode_count
             # Decay epsilon for the episodes that have already been run.
-            self.epsilon *= self.epsilon_decay_rate ** self.num_episodes_at_start
+            self.epsilon *= self.epsilon_decay_rate ** self.num_episodes_used_to_train_model
             return True
 
         return False
@@ -521,16 +573,50 @@ class SpheroDqnAgent:
 
         return max_episode_count
 
-    def _save_model(self, episode):
+    def _save_model(self):
         model_file = os.path.join(
-            self.path, f'model_{self.num_episodes_at_start + episode}.h5')
+            self.path, f'model_{self.num_episodes_used_to_train_model}.h5')
         self.model.save(model_file)
 
+    def _save_train_result(self, reward_sum, num_collisions_sum, velocity_magnitude_sum):
+        train_result_file_path = os.path.join(self.path, 'train_results.csv')
+        self._save_result(train_result_file_path, self.num_episodes_used_to_train_model,
+                          reward_sum, num_collisions_sum, velocity_magnitude_sum)
+
+    def _save_run_result(self, episode, reward_sum, num_collisions_sum, velocity_magnitude_sum):
+        run_result_file_path = os.path.join(
+            self.path, f'run_results_{self.num_episodes_used_to_train_model}.csv')
+        self._save_result(run_result_file_path, episode, reward_sum,
+                          num_collisions_sum, velocity_magnitude_sum)
+
+    def _save_result(self, result_file_path, episode, reward_sum, num_collisions_sum, velocity_magnitude_sum):
+        fieldnames = ['episode', 'total_reward',
+                      'total_collisions', 'average_velocity']
+        if os.path.exists(result_file_path):
+            # From csv documentation:
+            # If newline='' is not specified,
+            # newlines embedded inside quoted fields will not be interpreted correctly,
+            # and on platforms that use \r\n linendings on write an extra \r will be added.
+            # It should always be safe to specify newline='',
+            # since the csv module does its own (universal) newline handling.
+            with open(result_file_path, 'a', newline='') as result_file:
+                writer = csv.DictWriter(result_file, fieldnames=fieldnames,
+                                        delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow({'episode': episode, 'total_reward': reward_sum, 'total_collisions': num_collisions_sum,
+                                 'average_velocity': velocity_magnitude_sum / self.num_steps_per_episode})
+        else:
+            with open(result_file_path, 'w', newline='') as result_file:
+                writer = csv.DictWriter(result_file, fieldnames=fieldnames,
+                                        delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                writer.writeheader()
+                writer.writerow({'episode': episode, 'total_reward': reward_sum, 'total_collisions': num_collisions_sum,
+                                 'average_velocity': velocity_magnitude_sum / self.num_steps_per_episode})
+
 # endregion
 # endregion
 
+# region Helper functions
 
-# region helper functions
 
 def _index_to_action(action_index):
     return np.array([255 & action_index, 0x1FF & (action_index << 8)], dtype=int)

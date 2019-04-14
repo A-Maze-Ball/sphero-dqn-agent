@@ -124,6 +124,10 @@ The script will load a saved model from the `model_<episode count>.h5` file with
 This makes it easy to share your custom model configurations with someone else
 and have them keep training where you left off.
 
+## Results
+Results are saved to .csv files in the directory specified in the `-p ` or `--path` option.
+There are seperate files for results during training and results during non-training runs.
+
 ## Resources
 The following were referenced in the creation of this project.
 
