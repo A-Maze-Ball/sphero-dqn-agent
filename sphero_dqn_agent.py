@@ -8,6 +8,7 @@ import glob
 import re
 import random
 import csv
+import logging
 from collections import deque
 
 # ML related packages
@@ -17,6 +18,21 @@ import keras
 # Gym related packages
 import gym
 import gym_sphero
+
+# region Setup logging
+
+logger = logging.getLogger(
+    os.path.basename(__file__) if __name__ == '__main__' else __name__)
+logger.setLevel(logging.INFO)
+
+# create a console handler and set level to INFO
+consoleLogHandler = logging.StreamHandler()
+consoleLogHandler.setLevel(logging.INFO)
+consoleLogFormatter = logging.Formatter('%(name)s:%(levelname)s: %(message)s')
+consoleLogHandler.setFormatter(consoleLogFormatter)
+logger.addHandler(consoleLogHandler)
+
+# endregion
 
 # region Notes to the reader
 
@@ -78,7 +94,7 @@ class SpheroDqnAgent:
     LEARNING_RATE = 0.001
     NUM_STEPS_PER_EPISODE = 200
     BATCH_SIZE = 32
-    TARGET_TRANSFER_PERIOD = 50  # in num steps
+    TARGET_TRANSFER_PERIOD = 1  # in num episodes
     MEMORY_BUFFER_SIZE = 1000
 
     # Default bluetooth configurations
@@ -126,11 +142,25 @@ class SpheroDqnAgent:
             self._train(num_episodes, save_period)
         except:
             # Always save the model if an error occured.
+            logger.info('Error occured during training. Saving the model.')
             self._save_model()
             raise
 
+    def run(self, num_episodes=1):
+        self._run_episodes(num_episodes, training=False)
+
+# endregion
+
+# region Private members
+
     def _train(self, num_episodes, save_period):
-        for episode in range(num_episodes):
+        self._run_episodes(num_episodes, training=True,
+                           save_period=save_period)
+
+    def _run_episodes(self, num_episodes, training, save_period=None):
+        # Iterate through episodes as 1 based index.
+        # This is more convenient for logging and other checks.
+        for episode in range(1, num_episodes + 1):
             # Variables used to record results
             reward_sum = 0
             num_collisions_sum = 0
@@ -151,11 +181,16 @@ class SpheroDqnAgent:
                     state_t = self.env.reset()
                     break
                 except:
+                    logger.debug(
+                        f'Exception occured reseting the environment at beginning of episode {self.num_episodes_used_to_train_model + 1 if training else episode}.')
                     continue
 
             if state_t is None:
                 raise RuntimeError(
-                    "Could not reset environment at beginning of episode.")
+                    f'Could not reset environment at beginning of episode {self.num_episodes_used_to_train_model + 1 if training else episode}.')
+
+            logger.info(
+                f'Starting {"training" if training else "run"} episode {self.num_episodes_used_to_train_model + 1 if training else episode}.')
 
             # Assign placeholders for the t-1 variables
             state_tm1 = state_t
@@ -167,39 +202,32 @@ class SpheroDqnAgent:
             num_consecutive_step_failures = 0
             step_t = 0
             while step_t < self.num_steps_per_episode:
+                logger.debug(f'Starting time step {step_t}.')
                 obs_t = self._get_observation(state_tm1, action_tm1)
-                action_t = self._get_action(obs_t)
+                action_t = self._get_action(obs_t, use_epsilon=training)
+                logger.debug(
+                    f'Taking action {action_t} at time step {step_t}.')
                 try:
                     state_t, reward_t, done_t, _ = self.env.step(action_t)
                     num_consecutive_step_failures = 0
                 except:
                     if num_consecutive_step_failures < self.MAX_RETRY_ATTEMPTS:
+                        logger.debug(
+                            f'Error occured trying to take action (step). Retrying time step {step_t}.')
                         num_consecutive_step_failures += 1
-                        # Turn back time and skip this step.
-                        step_t -= 1
+                        # Skip this step without moving time forward.
                         continue
                     else:
                         raise RuntimeError(
-                            "Too many consecutive errors while trying to step occured in episode")
+                            f'Too many consecutive errors while trying to step occured in episode {self.num_episodes_used_to_train_model + 1 if training else episode}.')
 
-                self._remember(obs_tm1, action_tm1,
-                               reward_tm1, obs_t, done_tm1)
+                if training:
+                    self._remember(obs_tm1, action_tm1,
+                                   reward_tm1, obs_t, done_tm1)
 
                 reward_sum += reward_t
                 num_collisions_sum += state_t[-1]
                 velocity_magnitude_sum += np.linalg.norm(state_t[1])
-
-                # TODO: Do we want a different hyperparam than batch size here?
-                # TODO: We might need to train our model/network in-between
-                # episodes if it takes a significant amount of time.
-                # Alternatively, we could stop the sphero before training and
-                # take the low-velocity penalty?
-                if len(self.memory) > self.batch_size:
-                    self._replay()
-
-                # Convert to 1 based index before checking the transfer period.
-                if (step_t + 1) % self.target_transfer_period == 0:
-                    self._transfer_weights_to_target_model()
 
                 if done_t:
                     break
@@ -215,108 +243,62 @@ class SpheroDqnAgent:
 
             # Tell the Sphero to stop and get the previous reward
             # so we can save it in our memory replay buffer.
-            # Then do one more replay of experience.
+            logger.info(
+                f'Stopping Sphero at end of episode {self.num_episodes_used_to_train_model + 1 if training else episode}')
+
+            sphero_was_stopped = False
             for _ in range(self.MAX_RETRY_ATTEMPTS):
                 try:
                     state_t, reward_t, _, _ = self.env.step([0, 0])
                     obs_t = self._get_observation(state_tm1, action_tm1)
-                    self._remember(obs_tm1, action_tm1,
-                                   reward_tm1, obs_t, done_tm1)
 
-                    if len(self.memory) > self.batch_size:
-                        self._replay()
+                    if training:
+                        self._remember(obs_tm1, action_tm1,
+                                       reward_tm1, obs_t, done_tm1)
 
                     reward_sum += reward_t
                     num_collisions_sum += state_t[-1]
                     velocity_magnitude_sum += np.linalg.norm(state_t[1])
-                    break
-                except:
-                    raise RuntimeError(
-                        "Could not stop Sphero at end of episode.")
-
-            self.num_episodes_used_to_train_model += 1
-
-            self._decay_epsilon()
-
-            # Convert to 1 based index for saving
-            if (episode + 1) % save_period == 0:
-                self._save_model()
-
-            self._save_train_result(
-                reward_sum, num_collisions_sum, velocity_magnitude_sum)
-
-    def run(self, num_episodes=1):
-        for episode in range(num_episodes):
-            # Variables used to record results
-            reward_sum = 0
-            num_collisions_sum = 0
-            velocity_magnitude_sum = 0
-
-            state_t = None
-            for _ in range(self.MAX_RETRY_ATTEMPTS):
-                try:
-                    state_t = self.env.reset()
+                    sphero_was_stopped = True
                     break
                 except:
                     continue
 
-            if state_t is None:
-                raise RuntimeError(
-                    "Could not reset environment at beginning of episode.")
-
-            state_tm1 = state_t
-            action_tm1 = np.zeros(self.env.action_space.shape)
-
-            num_consecutive_step_failures = 0
-            step_t = 0
-            while step_t < self.num_steps_per_episode:
-                obs_t = self._get_observation(state_tm1, action_tm1)
-                # don't use epsilon randomness.
-                action_t = self._get_action(obs_t, False)
-                try:
-                    state_t, reward_t, done_t, _ = self.env.step(action_t)
-                    num_consecutive_step_failures = 0
-                except:
-                    if num_consecutive_step_failures < self.MAX_RETRY_ATTEMPTS:
-                        num_consecutive_step_failures += 1
-                        # Turn back time and skip this step.
-                        step_t -= 1
-                        continue
-                    else:
-                        raise RuntimeError(
-                            "Too many consecutive errors while trying to step occured in episode")
-
-                reward_sum += reward_t
-                num_collisions_sum += state_t[-1]
-                velocity_magnitude_sum += np.linalg.norm(state_t[1])
-
-                state_tm1 = state_t
-                action_tm1 = action_t
-                if done_t:
-                    break
-
-                # Update loop variable
-                step_t += 1
-
-            # Tell the sphero to stop.
-            for _ in range(self.MAX_RETRY_ATTEMPTS):
-                try:
-                    state_t, reward_t, _, _ = self.env.step([0, 0])
-                    reward_sum += reward_t
-                    num_collisions_sum += state_t[-1]
-                    velocity_magnitude_sum += np.linalg.norm(state_t[1])
-                    break
-                except:
+                if not sphero_was_stopped:
                     raise RuntimeError(
-                        "Could not stop Sphero at end of episode.")
+                        f'Could not stop Sphero at end of episode {self.num_episodes_used_to_train_model + 1 if training else episode}.')
 
-            # Convert to 1 based index for saving
-            self._save_run_result(episode + 1, reward_sum,
-                                  num_collisions_sum, velocity_magnitude_sum)
+            if training:
+                logger.info(
+                    f'Training model at end of episode {self.num_episodes_used_to_train_model + 1}.')
+                # We train our model/network in-between
+                # episodes since it can take a significant amount of time
+                # and we don't want to have drastically different time steps
+                # for training vs running.
+                for _ in range(step_t):
+                    # TODO: Do we want a different hyperparam than batch size here?
+                    if len(self.memory) > self.batch_size:
+                        self._replay()
 
-# endregion
+                # Convert to 1 based index before checking the transfer period.
+                if episode % self.target_transfer_period == 0:
+                    logger.info(
+                        f'Transfering weights to target model at end of episode {self.num_episodes_used_to_train_model + 1}.')
+                    self._transfer_weights_to_target_model()
 
-# region Private members
+                self.num_episodes_used_to_train_model += 1
+                self._decay_epsilon()
+
+                if episode % save_period == 0:
+                    logger.info(
+                        f'Saving model at end of episode {self.num_episodes_used_to_train_model}')
+                    self._save_model()
+
+                self._save_train_result(
+                    reward_sum, num_collisions_sum, velocity_magnitude_sum)
+            else:
+                self._save_run_result(
+                    episode, reward_sum, num_collisions_sum, velocity_magnitude_sum)
 
     def _build_model(self):
         state_size = np.sum([np.prod(space.shape)
@@ -637,6 +619,17 @@ def _reshape_state(state):
 def main():
     script_args = parse_args()
 
+    # Configure debug logging
+    if script_args.debug_log:
+        logger.setLevel(logging.DEBUG)
+        log_file_path = os.path.join(os.path.realpath(
+            os.path.abspath(script_args.path)), 'debug.log')
+        fileLogHandler = logging.FileHandler(log_file_path, mode='w')
+        fileLogFormatter = logging.Formatter(
+            '%(asctime)s - %(name)s:%(levelname)s: %(message)s')
+        fileLogHandler.setFormatter(fileLogFormatter)
+        logger.addHandler(fileLogHandler)
+
     # Make the "save" directory if it doesn't already exist
     os.makedirs(script_args.path, exist_ok=True)
     agent = SpheroDqnAgent(script_args.path)
@@ -667,6 +660,9 @@ def parse_args():
     parser.add_argument('-s', '--save-period', type=int, default=10,
                         help="""The number of episodes to train before saving the current model.
                         Only used in training sessions.""")
+
+    parser.add_argument('-d', '--debug-log', action='store_true',
+                        help="""Turn on debug logging. Logs to the file PATH/debug.log""")
 
     return parser.parse_args()
 
