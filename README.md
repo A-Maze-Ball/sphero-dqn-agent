@@ -89,7 +89,9 @@ They are configured in `hyperparams.json`.
 ### Environment
 
 These are the set of environment parameters and are configured in `env_config.json`.
+* `center_sphero_every_reset`
 * `max_steps_per_episode`
+* `stop_episode_at_collision`
 * `num_collisions_to_record`
 * `collision_penalty_multiplier`
 * `min_velocity_magnitude`

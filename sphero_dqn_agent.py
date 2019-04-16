@@ -110,7 +110,9 @@ class SpheroDqnAgent:
     LEVEL_SPHERO = False
 
     # Default env configurations to use if not present in env_config.
+    CENTER_SPHERO_EVERY_RESET = False
     MAX_STEPS_PER_EPISODE = 1000
+    STOP_EPISODE_AT_COLLISION = False
     NUM_COLLISIONS_TO_RECORD = 1
     COLLISION_PENALTY_MULTIPLIER = 1.0
     MIN_VELOCITY_MAGNITUDE = 4
@@ -229,9 +231,6 @@ class SpheroDqnAgent:
                 num_collisions_sum += state_t[-1]
                 velocity_magnitude_sum += np.linalg.norm(state_t[1])
 
-                if done_t:
-                    break
-
                 # Update time (our loop variable)
                 step_t += 1
                 # Updates for time t becoming time t-1
@@ -241,34 +240,32 @@ class SpheroDqnAgent:
                 obs_tm1 = obs_t
                 done_tm1 = done_t
 
-            # Tell the Sphero to stop and get the previous reward
-            # so we can save it in our memory replay buffer.
+                if done_t:
+                    break
+
+            # Tell the Sphero to stop and save the last step in the memory replay buffer.
             logger.info(
                 f'Stopping Sphero at end of episode {self.num_episodes_used_to_train_model + 1 if training else episode}')
 
-            sphero_was_stopped = False
+            sphero_stopped = False
             for _ in range(self.MAX_RETRY_ATTEMPTS):
                 try:
-                    state_t, reward_t, _, _ = self.env.step([0, 0])
-                    obs_t = self._get_observation(state_tm1, action_tm1)
-
-                    if training:
-                        self._remember(obs_tm1, action_tm1,
-                                       reward_tm1, obs_t, done_tm1)
-
-                    reward_sum += reward_t
-                    num_collisions_sum += state_t[-1]
-                    velocity_magnitude_sum += np.linalg.norm(state_t[1])
-                    sphero_was_stopped = True
+                    self.env.stop()
+                    sphero_stopped = True
                     break
                 except:
                     continue
 
-                if not sphero_was_stopped:
-                    raise RuntimeError(
-                        f'Could not stop Sphero at end of episode {self.num_episodes_used_to_train_model + 1 if training else episode}.')
+            if not sphero_stopped:
+                raise RuntimeError(
+                    f'Could not stop Sphero at end of episode {self.num_episodes_used_to_train_model + 1 if training else episode}.')
 
             if training:
+                # Remember the last experience.
+                obs_t = self._get_observation(state_tm1, action_tm1)
+                self._remember(obs_tm1, action_tm1,
+                               reward_tm1, obs_t, done_tm1)
+
                 logger.info(
                     f'Training model at end of episode {self.num_episodes_used_to_train_model + 1}.')
                 # We train our model/network in-between
@@ -470,7 +467,9 @@ class SpheroDqnAgent:
         with open(sphero_config_file_path, 'w') as sphero_config_file:
             json.dump(sphero_config_json, sphero_config_file, indent=2)
 
+        center_sphero_every_reset = self.CENTER_SPHERO_EVERY_RESET
         max_steps_per_episode = self.MAX_STEPS_PER_EPISODE
+        stop_episode_at_collision = self.STOP_EPISODE_AT_COLLISION
         num_collisions_to_record = self.NUM_COLLISIONS_TO_RECORD
         collision_penalty_multiplier = self.COLLISION_PENALTY_MULTIPLIER
         min_velocity_magnitude = self.MIN_VELOCITY_MAGNITUDE
@@ -480,8 +479,12 @@ class SpheroDqnAgent:
         if os.path.exists(env_config_file_path):
             with open(env_config_file_path) as env_config_file:
                 env_config_json = json.load(env_config_file)
+                center_sphero_every_reset = env_config_json.get(
+                    'center_sphero_every_reset', self.CENTER_SPHERO_EVERY_RESET)
                 max_steps_per_episode = env_config_json.get(
                     'max_steps_per_episode', self.MAX_STEPS_PER_EPISODE)
+                stop_episode_at_collision = env_config_json.get(
+                    'stop_episode_at_collision', self.STOP_EPISODE_AT_COLLISION)
                 num_collisions_to_record = env_config_json.get(
                     'num_collisions_to_record', self.NUM_COLLISIONS_TO_RECORD)
                 collision_penalty_multiplier = env_config_json.get(
@@ -494,7 +497,9 @@ class SpheroDqnAgent:
                     'velocity_reward_multiplier', self.VELOCITY_REWARD_MULTIPLIER)
 
         env_config_json = {
+            'center_sphero_every_reset': center_sphero_every_reset,
             'max_steps_per_episode': max_steps_per_episode,
+            'stop_episode_at_collision': stop_episode_at_collision,
             'num_collisions_to_record': num_collisions_to_record,
             'collision_penalty_multiplier': collision_penalty_multiplier,
             'min_velocity_magnitude': min_velocity_magnitude,
@@ -512,6 +517,8 @@ class SpheroDqnAgent:
                            min_collision_threshold=min_collision_threshold,
                            collision_dead_time_in_10ms=collision_dead_time,
                            max_num_steps_in_episode=max_steps_per_episode,
+                           stop_episode_at_collision=stop_episode_at_collision,
+                           center_sphero_every_reset=center_sphero_every_reset,
                            num_collisions_to_record=num_collisions_to_record,
                            collision_penalty_multiplier=collision_penalty_multiplier,
                            min_velocity_magnitude=min_velocity_magnitude,
