@@ -307,9 +307,12 @@ class SpheroDqnAgent:
         # the state at t-1 as our observation.
         obs_size = state_size + action_size
 
-        # Compute the total number of possible actions (255*359 for Sphero)
+        # Compute the total number of possible actions (256*360 for full control of the Sphero)
+        # e.g. np.prod([255, 359] - [0, 0] + [1, 1]) = np.prod([255 - 0 + 1, 359 - 0 + 1]) = 256*360
+        # Need to add [1, 1] since the range is inclusive.
+        # NOTE: + 1 is a shorthand for + [1, 1] since addition of np.array and scalar is an elementwise operation.
         num_actions = np.prod(
-            self.env.action_space.high - self.env.action_space.low)
+            (self.env.action_space.high - self.env.action_space.low) + 1)
 
         return build_neural_network(obs_size, num_actions, self.learning_rate)
 
@@ -608,11 +611,11 @@ class SpheroDqnAgent:
 
 
 def _index_to_action(action_index):
-    return np.array([255 & action_index, 0x1FF & (action_index << 8)], dtype=int)
+    return np.array([255 & action_index, 0x1FF & (action_index >> 8)], dtype=int)
 
 
 def _action_to_index(action):
-    return (255 & action[0]) | ((0x1FF & action[1]) >> 8)
+    return (255 & action[0]) | ((0x1FF & action[1]) << 8)
 
 
 def _reshape_state(state):
